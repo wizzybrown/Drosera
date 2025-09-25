@@ -1,0 +1,28 @@
+[trap]
+# Path to your compiled trap contract
+path = "out/LiquidityProtectionTrap.sol/LiquidityProtectionTrap.json"
+
+# Response contract configuration
+# Replace with your deployed LiquidityWithdrawer contract address
+response_contract = "0x0000000000000000000000000000000000000000"
+
+# Function signature for emergency withdrawal
+response_function = "emergencyWithdraw(address,address,uint256,uint256)"
+
+# Network configuration - Hoodi Testnet
+[network]
+rpc_url = "https://rpc.hoodi.ethpandaops.io"
+chain_id = 560048
+
+# Optional: Private key for deployment (or use DROSERA_PRIVATE_KEY env var)
+# private_key = "0x..."
+
+# Contract constructor parameters
+[constructor_args]
+# Replace these with actual addresses
+monitored_user = "0x0000000000000000000000000000000000000000"  # User address to monitor
+liquidity_pool = "0x0000000000000000000000000000000000000000"   # LP contract address (e.g., Uniswap V2 pair)
+
+# Example configurations for popular pools:
+# Uniswap V2 USDC/ETH: 0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc
+# Uniswap V2 WBTC/ETH: 0xBb2b8038a1640196FbE3e38816F3e67Cba72D940

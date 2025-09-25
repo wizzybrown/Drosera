@@ -1,0 +1,215 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "./Trap.sol";
+
+/**
+ * @title LiquidityProtectionTrap
+ * @dev Monitors user's liquidity position and triggers automatic withdrawal 
+ *      when position drops by 50% or more from initial deposit
+ */
+contract LiquidityProtectionTrap is Trap {
+    
+    // Events we want to monitor
+    string constant MINT_SIGNATURE = "Mint(address,uint256,uint256)";
+    string constant BURN_SIGNATURE = "Burn(address,uint256,uint256,address)";
+    string constant SYNC_SIGNATURE = "Sync(uint112,uint112)";
+    
+    // Configuration
+    address public immutable MONITORED_USER;
+    address public immutable LIQUIDITY_POOL;
+    uint256 public constant THRESHOLD_PERCENTAGE = 50; // 50% drop threshold
+    
+    // State tracking
+    struct LiquidityPosition {
+        uint256 initialLiquidity;
+        uint256 currentLiquidity;
+        uint256 blockNumber;
+        bool hasInitialDeposit;
+    }
+    
+    constructor(address _monitoredUser, address _liquidityPool) {
+        MONITORED_USER = _monitoredUser;
+        LIQUIDITY_POOL = _liquidityPool;
+    }
+    
+    /**
+     * @dev Define which events to monitor for liquidity changes
+     */
+    function eventLogFilters() public view override returns (EventFilter[] memory) {
+        EventFilter[] memory filters = new EventFilter[](3);
+        
+        // Monitor Mint events (liquidity additions)
+        filters[0] = EventFilter({
+            contractAddress: LIQUIDITY_POOL,
+            signature: MINT_SIGNATURE
+        });
+        
+        // Monitor Burn events (liquidity removals)
+        filters[1] = EventFilter({
+            contractAddress: LIQUIDITY_POOL,
+            signature: BURN_SIGNATURE
+        });
+        
+        // Monitor Sync events (reserve updates)
+        filters[2] = EventFilter({
+            contractAddress: LIQUIDITY_POOL,
+            signature: SYNC_SIGNATURE
+        });
+        
+        return filters;
+    }
+    
+    /**
+     * @dev Collect liquidity data from monitored events
+     */
+    function collect() external view override returns (bytes memory) {
+        EventLog[] memory logs = getEventLogs();
+        EventFilter[] memory filters = eventLogFilters();
+        
+        LiquidityPosition memory position = LiquidityPosition({
+            initialLiquidity: 0,
+            currentLiquidity: 0,
+            blockNumber: block.number,
+            hasInitialDeposit: false
+        });
+        
+        // Process all relevant events in the block
+        for (uint256 i = 0; i < logs.length; i++) {
+            EventLog memory log = logs[i];
+            
+            // Check if log matches our pool address
+            if (log.emitter != LIQUIDITY_POOL) continue;
+            
+            // Process Mint events (liquidity additions)
+            if (_matchesSignature(log, MINT_SIGNATURE)) {
+                (address sender, uint256 amount0, uint256 amount1) = _parseMintEvent(log);
+                if (sender == MONITORED_USER) {
+                    uint256 liquidityAmount = _calculateLiquidityValue(amount0, amount1);
+                    position.currentLiquidity += liquidityAmount;
+                    if (!position.hasInitialDeposit) {
+                        position.initialLiquidity = liquidityAmount;
+                        position.hasInitialDeposit = true;
+                    }
+                }
+            }
+            
+            // Process Burn events (liquidity removals)
+            else if (_matchesSignature(log, BURN_SIGNATURE)) {
+                (address sender, uint256 amount0, uint256 amount1, address to) = _parseBurnEvent(log);
+                if (sender == MONITORED_USER || to == MONITORED_USER) {
+                    uint256 liquidityAmount = _calculateLiquidityValue(amount0, amount1);
+                    position.currentLiquidity = position.currentLiquidity > liquidityAmount 
+                        ? position.currentLiquidity - liquidityAmount 
+                        : 0;
+                }
+            }
+        }
+        
+        return abi.encode(position);
+    }
+    
+    /**
+     * @dev Determine if automatic withdrawal should be triggered
+     */
+    function shouldRespond(bytes[] calldata data) external pure override returns (bool, bytes memory) {
+        if (data.length == 0) {
+            return (false, abi.encode("No data available"));
+        }
+        
+        // Get the most recent liquidity position data
+        LiquidityPosition memory currentPosition = abi.decode(data[0], (LiquidityPosition));
+        
+        // Check if we have an initial deposit to compare against
+        if (!currentPosition.hasInitialDeposit || currentPosition.initialLiquidity == 0) {
+            return (false, abi.encode("No initial deposit found"));
+        }
+        
+        // Calculate percentage drop
+        uint256 percentageDrop = _calculatePercentageDrop(
+            currentPosition.initialLiquidity,
+            currentPosition.currentLiquidity
+        );
+        
+        // Trigger withdrawal if drop is >= threshold
+        if (percentageDrop >= THRESHOLD_PERCENTAGE) {
+            bytes memory responseData = abi.encode(
+                MONITORED_USER,
+                LIQUIDITY_POOL,
+                currentPosition.currentLiquidity,
+                percentageDrop
+            );
+            return (true, responseData);
+        }
+        
+        return (false, abi.encode("Position within acceptable range"));
+    }
+    
+    /**
+     * @dev Parse Mint event data
+     */
+    function _parseMintEvent(EventLog memory log) internal pure returns (address sender, uint256 amount0, uint256 amount1) {
+        // Mint(address indexed sender, uint256 amount0, uint256 amount1)
+        sender = address(uint160(uint256(log.topics[1])));
+        (amount0, amount1) = abi.decode(log.data, (uint256, uint256));
+    }
+    
+    /**
+     * @dev Parse Burn event data
+     */
+    function _parseBurnEvent(EventLog memory log) internal pure returns (address sender, uint256 amount0, uint256 amount1, address to) {
+        // Burn(address indexed sender, uint256 amount0, uint256 amount1, address indexed to)
+        sender = address(uint160(uint256(log.topics[1])));
+        to = address(uint160(uint256(log.topics[2])));
+        (amount0, amount1) = abi.decode(log.data, (uint256, uint256));
+    }
+    
+    /**
+     * @dev Check if event log matches a specific signature
+     */
+    function _matchesSignature(EventLog memory log, string memory signature) internal pure returns (bool) {
+        bytes32 signatureHash = keccak256(abi.encodePacked(signature));
+        return log.topics.length > 0 && log.topics[0] == signatureHash;
+    }
+    
+    /**
+     * @dev Calculate liquidity value from token amounts (simplified)
+     */
+    function _calculateLiquidityValue(uint256 amount0, uint256 amount1) internal pure returns (uint256) {
+        // Simplified calculation - in production, you'd want to consider token prices
+        // This assumes both tokens have similar value or you can implement proper pricing
+        return (amount0 + amount1) / 2;
+    }
+    
+    /**
+     * @dev Calculate percentage drop between initial and current liquidity
+     */
+    function _calculatePercentageDrop(uint256 initial, uint256 current) internal pure returns (uint256) {
+        if (initial == 0) return 0;
+        if (current >= initial) return 0;
+        
+        uint256 drop = initial - current;
+        return (drop * 100) / initial;
+    }
+    
+    /**
+     * @dev Get monitored user address
+     */
+    function getMonitoredUser() external view returns (address) {
+        return MONITORED_USER;
+    }
+    
+    /**
+     * @dev Get monitored liquidity pool address
+     */
+    function getLiquidityPool() external view returns (address) {
+        return LIQUIDITY_POOL;
+    }
+    
+    /**
+     * @dev Get threshold percentage
+     */
+    function getThresholdPercentage() external pure returns (uint256) {
+        return THRESHOLD_PERCENTAGE;
+    }
+}

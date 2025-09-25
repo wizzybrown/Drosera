@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "forge-std/Script.sol";
+import "../src/LiquidityProtectionTrap.sol";
+import "../src/LiquidityWithdrawer.sol";
+
+contract Deploy is Script {
+    function run() external {
+        // Read environment variables
+        address monitoredUser = vm.envAddress("MONITORED_USER");
+        address liquidityPool = vm.envAddress("LIQUIDITY_POOL");
+        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
+        
+        vm.startBroadcast(deployerPrivateKey);
+        
+        // Deploy the response contract first
+        LiquidityWithdrawer withdrawer = new LiquidityWithdrawer();
+        console.log("LiquidityWithdrawer deployed at:", address(withdrawer));
+        
+        // Deploy the trap contract
+        LiquidityProtectionTrap trap = new LiquidityProtectionTrap(
+            monitoredUser,
+            liquidityPool
+        );
+        console.log("LiquidityProtectionTrap deployed at:", address(trap));
+        
+        // Authorize the Drosera network to call the withdrawer
+        // You'll need to add the actual Drosera operator addresses
+        // withdrawer.addAuthorizedCaller(DROSERA_OPERATOR_ADDRESS);
+        
+        vm.stopBroadcast();
+        
+        console.log("Deployment completed!");
+        console.log("Remember to:");
+        console.log("1. Add Drosera operators as authorized callers to the withdrawer");
+        console.log("2. Update drosera.toml with the withdrawer address");
+        console.log("3. Ensure users approve the withdrawer to spend their LP tokens");
+    }
+}

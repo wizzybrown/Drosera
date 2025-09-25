@@ -1,0 +1,28 @@
+{
+  "name": "liquidity-protection-trap",
+  "version": "1.0.0",
+  "description": "Drosera Network trap for liquidity position protection",
+  "main": "index.js",
+  "scripts": {
+    "build": "forge build",
+    "test": "forge test",
+    "deploy:local": "forge script script/Deploy.s.sol --rpc-url http://localhost:8545 --broadcast",
+    "deploy:hoodi": "forge script script/Deploy.s.sol --rpc-url $HOODI_RPC_URL --broadcast",
+    "deploy:mainnet": "forge script script/Deploy.s.sol --rpc-url $MAINNET_RPC_URL --broadcast --verify",
+    "deploy:goerli": "forge script script/Deploy.s.sol --rpc-url $GOERLI_RPC_URL --broadcast --verify"
+  },
+  "keywords": [
+    "drosera",
+    "defi",
+    "liquidity",
+    "protection",
+    "ethereum",
+    "solidity"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^18.0.0"
+  },
+  "dependencies": {}
+}

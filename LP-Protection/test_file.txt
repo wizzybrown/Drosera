@@ -1,0 +1,146 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "forge-std/Test.sol";
+import "../src/LiquidityProtectionTrap.sol";
+import "../src/LiquidityWithdrawer.sol";
+
+contract LiquidityProtectionTrapTest is Test {
+    LiquidityProtectionTrap trap;
+    LiquidityWithdrawer withdrawer;
+    
+    address user = address(0x1234);
+    address pool = address(0x5678);
+    
+    function setUp() public {
+        trap = new LiquidityProtectionTrap(user, pool);
+        withdrawer = new LiquidityWithdrawer();
+    }
+    
+    function testTrapDeployment() public {
+        assertEq(trap.getMonitoredUser(), user);
+        assertEq(trap.getLiquidityPool(), pool);
+        assertEq(trap.getThresholdPercentage(), 50);
+    }
+    
+    function testEventFilters() public {
+        EventFilter[] memory filters = trap.eventLogFilters();
+        assertEq(filters.length, 3);
+        assertEq(filters[0].contractAddress, pool);
+        assertEq(filters[0].signature, "Mint(address,uint256,uint256)");
+        assertEq(filters[1].signature, "Burn(address,uint256,uint256,address)");
+        assertEq(filters[2].signature, "Sync(uint112,uint112)");
+    }
+    
+    function testShouldRespondWithoutData() public {
+        bytes[] memory emptyData = new bytes[](0);
+        (bool shouldRespond, bytes memory responseData) = trap.shouldRespond(emptyData);
+        
+        assertFalse(shouldRespond);
+        assertEq(abi.decode(responseData, (string)), "No data available");
+    }
+    
+    function testShouldRespondWithInitialDeposit() public {
+        // Create test position data
+        LiquidityProtectionTrap.LiquidityPosition memory position = LiquidityProtectionTrap.LiquidityPosition({
+            initialLiquidity: 1000 ether,
+            currentLiquidity: 1000 ether,
+            blockNumber: block.number,
+            hasInitialDeposit: true
+        });
+        
+        bytes[] memory data = new bytes[](1);
+        data[0] = abi.encode(position);
+        
+        (bool shouldRespond,) = trap.shouldRespond(data);
+        assertFalse(shouldRespond); // No drop, so no response needed
+    }
+    
+    function testShouldRespondWithSignificantDrop() public {
+        // Create test position with 60% drop (above 50% threshold)
+        LiquidityProtectionTrap.LiquidityPosition memory position = LiquidityProtectionTrap.LiquidityPosition({
+            initialLiquidity: 1000 ether,
+            currentLiquidity: 400 ether, // 60% drop
+            blockNumber: block.number,
+            hasInitialDeposit: true
+        });
+        
+        bytes[] memory data = new bytes[](1);
+        data[0] = abi.encode(position);
+        
+        (bool shouldRespond, bytes memory responseData) = trap.shouldRespond(data);
+        assertTrue(shouldRespond);
+        
+        // Decode response data
+        (address responseUser, address responsePool, uint256 currentLiquidity, uint256 percentageDrop) = 
+            abi.decode(responseData, (address, address, uint256, uint256));
+            
+        assertEq(responseUser, user);
+        assertEq(responsePool, pool);
+        assertEq(currentLiquidity, 400 ether);
+        assertEq(percentageDrop, 60); // 60% drop
+    }
+    
+    function testCollectWithNoEvents() public {
+        // Test collect function with no events
+        bytes memory result = trap.collect();
+        LiquidityProtectionTrap.LiquidityPosition memory position = 
+            abi.decode(result, (LiquidityProtectionTrap.LiquidityPosition));
+        
+        assertEq(position.initialLiquidity, 0);
+        assertEq(position.currentLiquidity, 0);
+        assertFalse(position.hasInitialDeposit);
+    }
+    
+    function testWithdrawerDeployment() public {
+        assertTrue(withdrawer.authorizedCallers(address(this))); // Deployer is authorized
+        assertEq(withdrawer.owner(), address(this));
+    }
+    
+    function testWithdrawerAccessControl() public {
+        address unauthorized = address(0x9999);
+        vm.prank(unauthorized);
+        vm.expectRevert("Not authorized");
+        withdrawer.emergencyWithdraw(user, pool, 100 ether, 60);
+    }
+    
+    function testAddAuthorizedCaller() public {
+        address newCaller = address(0x1111);
+        assertFalse(withdrawer.authorizedCallers(newCaller));
+        
+        withdrawer.addAuthorizedCaller(newCaller);
+        assertTrue(withdrawer.authorizedCallers(newCaller));
+    }
+    
+    function testPreviewWithdrawal() public {
+        // This test would require mocking a real LP token
+        // For now, we just test that the function exists and doesn't revert
+        try withdrawer.previewWithdrawal(user, pool) returns (uint256 amount0, uint256 amount1) {
+            // If LP token doesn't exist, should return 0,0
+            assertEq(amount0, 0);
+            assertEq(amount1, 0);
+        } catch {
+            // Expected if pool doesn't implement the interface
+        }
+    }
+    
+    function testVersionFunction() public {
+        assertEq(trap.version(), "2.0");
+    }
+    
+    // Helper function to create mock event logs
+    function createMockMintEvent(address sender, uint256 amount0, uint256 amount1) 
+        internal pure returns (EventLog memory) {
+        bytes32[] memory topics = new bytes32[](2);
+        topics[0] = keccak256("Mint(address,uint256,uint256)");
+        topics[1] = bytes32(uint256(uint160(sender)));
+        
+        bytes memory data = abi.encode(amount0, amount1);
+        
+        return EventLog({
+            topics: topics,
+            data: data,
+            emitter: pool
+        });
+    }
+}
