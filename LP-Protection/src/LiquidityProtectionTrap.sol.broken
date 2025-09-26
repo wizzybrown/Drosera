@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
+import {EventLog, EventFilter, EventFilterLib} from "drosera-network-contracts/src/libraries/Events.sol";
 
-import "./Trap.sol";
+import {Trap} from "drosera-network-contracts/src/Trap.sol";
 
 /**
  * @title LiquidityProtectionTrap
@@ -112,7 +113,7 @@ contract LiquidityProtectionTrap is Trap {
     /**
      * @dev Determine if automatic withdrawal should be triggered
      */
-    function shouldRespond(bytes[] calldata data) external pure override returns (bool, bytes memory) {
+    function shouldRespond(bytes[] calldata data) external view override returns (bool, bytes memory) {
         if (data.length == 0) {
             return (false, abi.encode("No data available"));
         }
