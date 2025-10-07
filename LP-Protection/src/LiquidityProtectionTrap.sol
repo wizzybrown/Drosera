@@ -1,47 +1,38 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
-import {EventLog, EventFilter, EventFilterLib} from "drosera-network-contracts/src/libraries/Events.sol";
+import {EventLog, EventFilter} from "drosera-network-contracts/src/libraries/Events.sol";
 import {Trap} from "drosera-network-contracts/src/Trap.sol";
 
 /**
  * @title LiquidityProtectionTrap
- * @dev Monitors user's liquidity position and triggers automatic withdrawal 
- *      when position drops by 50% or more from initial deposit
+ * @dev Monitors user's LP token balance and triggers withdrawal when position drops by 50%+
+ * @notice Stateless design - config embedded in collect payload for Drosera compatibility
  */
 contract LiquidityProtectionTrap is Trap {
     
-    // Events we want to monitor
-    string constant MINT_SIGNATURE = "Mint(address,uint256,uint256)";
-    string constant BURN_SIGNATURE = "Burn(address,uint256,uint256,address)";
+    // Hardcoded configuration (replace with your actual addresses)
+    address constant MONITORED_USER = 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb; // Replace with actual user
+    address constant LIQUIDITY_POOL = 0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc; // Replace with actual pool
+    
+    // Events to monitor
+    string constant TRANSFER_SIGNATURE = "Transfer(address,address,uint256)";
     string constant SYNC_SIGNATURE = "Sync(uint112,uint112)";
     
-    // Configuration
-    address public immutable MONITORED_USER;
-    address public immutable LIQUIDITY_POOL;
+    // Threshold: 50% drop = 5000 basis points
+    uint256 constant DROP_THRESHOLD = 5000;
+    uint256 constant BASIS_POINTS = 10000;
     
-    // Threshold for position drop (50% = 5000 basis points)
-    uint256 public constant DROP_THRESHOLD = 5000;
-    uint256 public constant BASIS_POINTS = 10000;
-    
-    constructor(address _monitoredUser, address _liquidityPool) {
-        MONITORED_USER = _monitoredUser;
-        LIQUIDITY_POOL = _liquidityPool;
-    }
-    
-    function eventLogFilters() public view override returns (EventFilter[] memory) {
-        EventFilter[] memory filters = new EventFilter[](3);
+    function eventLogFilters() public pure override returns (EventFilter[] memory) {
+        EventFilter[] memory filters = new EventFilter[](2);
         
+        // Monitor LP token transfers
         filters[0] = EventFilter({
             contractAddress: LIQUIDITY_POOL,
-            signature: MINT_SIGNATURE
+            signature: TRANSFER_SIGNATURE
         });
         
+        // Monitor reserve updates
         filters[1] = EventFilter({
-            contractAddress: LIQUIDITY_POOL,
-            signature: BURN_SIGNATURE
-        });
-        
-        filters[2] = EventFilter({
             contractAddress: LIQUIDITY_POOL,
             signature: SYNC_SIGNATURE
         });
@@ -52,48 +43,56 @@ contract LiquidityProtectionTrap is Trap {
     function collect() external view override returns (bytes memory) {
         EventLog[] memory logs = getEventLogs();
         
-        uint256 totalMints = 0;
-        uint256 totalBurns = 0;
+        uint256 userLPBalance = 0;
+        uint256 totalSupply = 0;
         uint112 reserve0 = 0;
         uint112 reserve1 = 0;
         
-        // Process event logs
+        // Process Transfer events to calculate user's LP balance
         for (uint256 i = 0; i < logs.length; i++) {
             EventLog memory log = logs[i];
             
-            // Skip if not from our monitored pool
             if (log.emitter != LIQUIDITY_POOL) continue;
             
-            // Check for Mint events
-            if (log.topics.length > 0 && log.topics[0] == keccak256(bytes(MINT_SIGNATURE))) {
-                if (log.topics.length >= 2) {
-                    address minter = address(uint160(uint256(log.topics[1])));
-                    if (minter == MONITORED_USER) {
-                        (uint256 amount0, uint256 amount1) = abi.decode(log.data, (uint256, uint256));
-                        totalMints += amount0 + amount1;
-                    }
+            // Handle Transfer events for LP token
+            if (log.topics.length >= 3 && log.topics[0] == keccak256(bytes(TRANSFER_SIGNATURE))) {
+                address from = address(uint160(uint256(log.topics[1])));
+                address to = address(uint160(uint256(log.topics[2])));
+                uint256 amount = abi.decode(log.data, (uint256));
+                
+                // Update user balance based on transfers
+                if (to == MONITORED_USER) {
+                    userLPBalance += amount;
+                }
+                if (from == MONITORED_USER) {
+                    userLPBalance = userLPBalance > amount ? userLPBalance - amount : 0;
+                }
+                
+                // Track total supply changes (mints from 0x0, burns to 0x0)
+                if (from == address(0)) {
+                    totalSupply += amount;
+                }
+                if (to == address(0)) {
+                    totalSupply = totalSupply > amount ? totalSupply - amount : 0;
                 }
             }
             
-            // Check for Burn events
-            else if (log.topics.length > 0 && log.topics[0] == keccak256(bytes(BURN_SIGNATURE))) {
-                if (log.topics.length >= 2) {
-                    address burner = address(uint160(uint256(log.topics[1])));
-                    if (burner == MONITORED_USER) {
-                        (uint256 amount0, uint256 amount1,) = abi.decode(log.data, (uint256, uint256, address));
-                        totalBurns += amount0 + amount1;
-                    }
-                }
-            }
-            
-            // Check for Sync events (reserve updates)
+            // Handle Sync events for reserve tracking
             else if (log.topics.length > 0 && log.topics[0] == keccak256(bytes(SYNC_SIGNATURE))) {
                 (reserve0, reserve1) = abi.decode(log.data, (uint112, uint112));
             }
         }
         
-        // Include the monitored addresses in the return data so shouldRespond can access them
-        return abi.encode(totalMints, totalBurns, reserve0, reserve1, block.timestamp, MONITORED_USER, LIQUIDITY_POOL);
+        // Return: userLPBalance, totalSupply, reserve0, reserve1, timestamp, user, pool
+        return abi.encode(
+            userLPBalance,
+            totalSupply,
+            reserve0,
+            reserve1,
+            block.timestamp,
+            MONITORED_USER,
+            LIQUIDITY_POOL
+        );
     }
     
     function shouldRespond(bytes[] calldata data) external pure override returns (bool, bytes memory) {
@@ -101,51 +100,53 @@ contract LiquidityProtectionTrap is Trap {
             return (false, "");
         }
         
-        // Decode current and previous data (now includes monitored addresses)
-        (uint256 currentMints, uint256 currentBurns, uint112 currentReserve0, uint112 currentReserve1,, address monitoredUser, address liquidityPool) = 
-            abi.decode(data[0], (uint256, uint256, uint112, uint112, uint256, address, address));
-            
-        (uint256 prevMints, uint256 prevBurns, uint112 prevReserve0, uint112 prevReserve1,,, ) = 
-            abi.decode(data[1], (uint256, uint256, uint112, uint112, uint256, address, address));
+        // Decode current state
+        (
+            uint256 currentLPBalance,
+            uint256 currentTotalSupply,
+            uint112 currentReserve0,
+            uint112 currentReserve1,
+            ,
+            address monitoredUser,
+            address liquidityPool
+        ) = abi.decode(data[0], (uint256, uint256, uint112, uint112, uint256, address, address));
         
-        // Calculate position change
-        uint256 netCurrentPosition = currentMints > currentBurns ? currentMints - currentBurns : 0;
-        uint256 netPrevPosition = prevMints > prevBurns ? prevMints - prevBurns : 0;
+        // Decode previous state
+        (
+            uint256 prevLPBalance,
+            uint256 prevTotalSupply,
+            uint112 prevReserve0,
+            uint112 prevReserve1,
+            ,,
+        ) = abi.decode(data[1], (uint256, uint256, uint112, uint112, uint256, address, address));
         
-        // Check for significant position drop
-        if (netPrevPosition > 0 && netCurrentPosition < netPrevPosition) {
-            uint256 positionDrop = netPrevPosition - netCurrentPosition;
-            uint256 dropPercentage = (positionDrop * BASIS_POINTS) / netPrevPosition;
+        // Check for significant LP balance drop
+        if (prevLPBalance > 0 && currentLPBalance < prevLPBalance) {
+            uint256 balanceDrop = prevLPBalance - currentLPBalance;
+            uint256 dropPercentage = (balanceDrop * BASIS_POINTS) / prevLPBalance;
             
             if (dropPercentage >= DROP_THRESHOLD) {
+                // Return payload matching responder: (pair, amount)
+                // amount=0 means withdraw all LP tokens held by responder
                 return (
                     true,
-                    abi.encode(
-                        monitoredUser,
-                        liquidityPool,
-                        dropPercentage,
-                        "Liquidity position dropped by more than 50%"
-                    )
+                    abi.encode(liquidityPool, uint256(0))
                 );
             }
         }
         
-        // Check for significant reserve drops (indicating potential rug pull)
+        // Check for significant reserve drops (rug pull indicator)
         if (prevReserve0 > 0 && prevReserve1 > 0) {
             uint256 reserve0Drop = prevReserve0 > currentReserve0 ? 
-                ((prevReserve0 - currentReserve0) * BASIS_POINTS) / prevReserve0 : 0;
+                ((uint256(prevReserve0) - uint256(currentReserve0)) * BASIS_POINTS) / uint256(prevReserve0) : 0;
             uint256 reserve1Drop = prevReserve1 > currentReserve1 ? 
-                ((prevReserve1 - currentReserve1) * BASIS_POINTS) / prevReserve1 : 0;
+                ((uint256(prevReserve1) - uint256(currentReserve1)) * BASIS_POINTS) / uint256(prevReserve1) : 0;
             
             if (reserve0Drop >= DROP_THRESHOLD || reserve1Drop >= DROP_THRESHOLD) {
+                // Trigger emergency withdrawal on significant reserve drop
                 return (
                     true,
-                    abi.encode(
-                        monitoredUser,
-                        liquidityPool,
-                        reserve0Drop > reserve1Drop ? reserve0Drop : reserve1Drop,
-                        "Significant liquidity pool reserve drop detected"
-                    )
+                    abi.encode(liquidityPool, uint256(0))
                 );
             }
         }
