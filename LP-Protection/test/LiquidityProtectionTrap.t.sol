@@ -4,109 +4,250 @@ pragma solidity ^0.8.24;
 import {Test, console} from "forge-std/Test.sol";
 import "../src/LiquidityProtectionTrap.sol";
 import "../src/LiquidityWithdrawer.sol";
-import {EventLog, EventFilter} from "drosera-network-contracts/src/libraries/Events.sol";
 
 contract LiquidityProtectionTrapTest is Test {
     LiquidityProtectionTrap public trap;
     LiquidityWithdrawer public withdrawer;
     
-    address public monitoredUser = address(0x1234);
-    address public liquidityPool = address(0x5678);
+    address public constant MONITORED_USER = 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb;
+    address public constant LIQUIDITY_POOL = 0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc;
     address public droseraResponse = address(0x9999);
     
     function setUp() public {
-        trap = new LiquidityProtectionTrap(monitoredUser, liquidityPool);
+        trap = new LiquidityProtectionTrap();
         withdrawer = new LiquidityWithdrawer(droseraResponse);
-    }
-    
-    function test_Constructor() public {
-        assertEq(trap.MONITORED_USER(), monitoredUser, "Monitored user should be set correctly");
-        assertEq(trap.LIQUIDITY_POOL(), liquidityPool, "Liquidity pool should be set correctly");
-        assertEq(withdrawer.owner(), address(this), "Withdrawer owner should be deployer");
-        assertEq(withdrawer.droseraResponse(), droseraResponse, "Drosera response should be set correctly");
     }
     
     function test_EventLogFilters() public {
         EventFilter[] memory filters = trap.eventLogFilters();
-        assertEq(filters.length, 3, "Should have 3 event filters");
+        assertEq(filters.length, 1, "Should have 1 event filter");
         
-        assertEq(filters[0].contractAddress, liquidityPool, "First filter should monitor liquidity pool");
-        assertEq(filters[0].signature, "Mint(address,uint256,uint256)", "First filter should be for Mint events");
-        
-        assertEq(filters[1].contractAddress, liquidityPool, "Second filter should monitor liquidity pool");
-        assertEq(filters[1].signature, "Burn(address,uint256,uint256,address)", "Second filter should be for Burn events");
-        
-        assertEq(filters[2].contractAddress, liquidityPool, "Third filter should monitor liquidity pool");
-        assertEq(filters[2].signature, "Sync(uint112,uint112)", "Third filter should be for Sync events");
+        assertEq(filters[0].contractAddress, LIQUIDITY_POOL, "Filter should monitor liquidity pool");
+        assertEq(filters[0].signature, "Sync(uint112,uint112)", "Filter should be for Sync events");
     }
     
-    function test_Collect_EmptyLogs() public {
+    function test_Collect_ReturnsCorrectStructure() public {
         bytes memory data = trap.collect();
-        (uint256 totalMints, uint256 totalBurns, uint112 reserve0, uint112 reserve1, uint256 timestamp) = 
-            abi.decode(data, (uint256, uint256, uint112, uint112, uint256));
         
-        assertEq(totalMints, 0, "Total mints should be 0 with no logs");
-        assertEq(totalBurns, 0, "Total burns should be 0 with no logs");
-        assertEq(reserve0, 0, "Reserve0 should be 0 with no logs");
-        assertEq(reserve1, 0, "Reserve1 should be 0 with no logs");
+        // Decode to verify structure (7 values)
+        (
+            uint256 userLPBalance,
+            uint256 totalSupply,
+            uint112 reserve0,
+            uint112 reserve1,
+            uint256 timestamp,
+            address user,
+            address pool
+        ) = abi.decode(data, (uint256, uint256, uint112, uint112, uint256, address, address));
+        
+        // Verify addresses are correct
+        assertEq(user, MONITORED_USER, "Should return monitored user");
+        assertEq(pool, LIQUIDITY_POOL, "Should return liquidity pool");
         assertGt(timestamp, 0, "Timestamp should be set");
+        
+        // Note: userLPBalance, totalSupply, reserves will be 0 in test environment
+        // unless you mock the pair contract
     }
     
     function test_ShouldRespond_InsufficientData() public {
         bytes[] memory data = new bytes[](1);
-        data[0] = abi.encode(uint256(100), uint256(50), uint112(1000), uint112(2000), block.timestamp);
+        data[0] = abi.encode(
+            uint256(100), uint256(1000), 
+            uint112(5000), uint112(10000), 
+            block.timestamp, MONITORED_USER, LIQUIDITY_POOL
+        );
         
         (bool shouldRespond, ) = trap.shouldRespond(data);
         assertFalse(shouldRespond, "Should not respond with insufficient data");
     }
     
-    function test_ShouldRespond_SignificantDrop() public {
+    function test_ShouldRespond_EmptyData() public {
+        bytes[] memory data = new bytes[](2);
+        data[0] = "";  // Empty current
+        data[1] = abi.encode(
+            uint256(100), uint256(1000), 
+            uint112(5000), uint112(10000), 
+            block.timestamp, MONITORED_USER, LIQUIDITY_POOL
+        );
+        
+        (bool shouldRespond, ) = trap.shouldRespond(data);
+        assertFalse(shouldRespond, "Should not respond with empty data");
+    }
+    
+    function test_ShouldRespond_SignificantLPBalanceDrop() public {
         bytes[] memory data = new bytes[](2);
         
-        // Previous state: 1000 mints, 0 burns (net position: 1000)
-        data[1] = abi.encode(uint256(1000), uint256(0), uint112(5000), uint112(10000), block.timestamp);
+        // Previous state: 1000 LP tokens
+        data[1] = abi.encode(
+            uint256(1000),    // userLPBalance
+            uint256(10000),   // totalSupply
+            uint112(50000),   // reserve0
+            uint112(100000),  // reserve1
+            block.timestamp - 100,
+            MONITORED_USER,
+            LIQUIDITY_POOL
+        );
         
-        // Current state: 1000 mints, 600 burns (net position: 400, which is 60% drop)
-        data[0] = abi.encode(uint256(1000), uint256(600), uint112(3000), uint112(6000), block.timestamp);
+        // Current state: 400 LP tokens (60% drop)
+        data[0] = abi.encode(
+            uint256(400),     // userLPBalance - 60% drop!
+            uint256(10000),   // totalSupply (unchanged)
+            uint112(50000),   // reserve0 (unchanged)
+            uint112(100000),  // reserve1 (unchanged)
+            block.timestamp,
+            MONITORED_USER,
+            LIQUIDITY_POOL
+        );
         
         (bool shouldRespond, bytes memory responseData) = trap.shouldRespond(data);
         
-        assertTrue(shouldRespond, "Should respond to significant position drop");
+        assertTrue(shouldRespond, "Should respond to 60% LP balance drop");
         
-        (address user, address pool, uint256 dropPercentage, string memory message) = 
-            abi.decode(responseData, (address, address, uint256, string));
-        
-        assertEq(user, monitoredUser, "Response should include monitored user");
-        assertEq(pool, liquidityPool, "Response should include liquidity pool");
-        assertGe(dropPercentage, 5000, "Drop percentage should be at least 50%");
-        assertTrue(bytes(message).length > 0, "Response should include message");
+        // Verify response payload
+        (address pool, uint256 amount) = abi.decode(responseData, (address, uint256));
+        assertEq(pool, LIQUIDITY_POOL, "Response should include pool address");
+        assertEq(amount, 0, "Amount 0 means withdraw all");
     }
     
-    function test_ShouldNotRespond_SmallDrop() public {
+    function test_ShouldNotRespond_SmallLPBalanceDrop() public {
         bytes[] memory data = new bytes[](2);
         
-        // Previous state: 1000 mints, 0 burns (net position: 1000)
-        data[1] = abi.encode(uint256(1000), uint256(0), uint112(5000), uint112(10000), block.timestamp);
+        // Previous state: 1000 LP tokens
+        data[1] = abi.encode(
+            uint256(1000),
+            uint256(10000),
+            uint112(50000),
+            uint112(100000),
+            block.timestamp - 100,
+            MONITORED_USER,
+            LIQUIDITY_POOL
+        );
         
-        // Current state: 1000 mints, 200 burns (net position: 800, which is 20% drop)
-        data[0] = abi.encode(uint256(1000), uint256(200), uint112(4000), uint112(8000), block.timestamp);
+        // Current state: 800 LP tokens (20% drop - below threshold)
+        data[0] = abi.encode(
+            uint256(800),
+            uint256(10000),
+            uint112(50000),
+            uint112(100000),
+            block.timestamp,
+            MONITORED_USER,
+            LIQUIDITY_POOL
+        );
         
         (bool shouldRespond, ) = trap.shouldRespond(data);
         
-        assertFalse(shouldRespond, "Should not respond to small position drop");
+        assertFalse(shouldRespond, "Should not respond to 20% drop (below 50% threshold)");
+    }
+    
+    function test_ShouldRespond_SignificantReserve0Drop() public {
+        bytes[] memory data = new bytes[](2);
+        
+        // Previous state: Normal reserves
+        data[1] = abi.encode(
+            uint256(1000),
+            uint256(10000),
+            uint112(100000),  // reserve0
+            uint112(200000),  // reserve1
+            block.timestamp - 100,
+            MONITORED_USER,
+            LIQUIDITY_POOL
+        );
+        
+        // Current state: reserve0 dropped 60% (rug pull!)
+        data[0] = abi.encode(
+            uint256(1000),    // LP balance unchanged
+            uint256(10000),
+            uint112(40000),   // reserve0 dropped to 40% of original
+            uint112(200000),  // reserve1 unchanged
+            block.timestamp,
+            MONITORED_USER,
+            LIQUIDITY_POOL
+        );
+        
+        (bool shouldRespond, bytes memory responseData) = trap.shouldRespond(data);
+        
+        assertTrue(shouldRespond, "Should respond to 60% reserve0 drop (rug pull)");
+        
+        (address pool, uint256 amount) = abi.decode(responseData, (address, uint256));
+        assertEq(pool, LIQUIDITY_POOL);
+        assertEq(amount, 0);
+    }
+    
+    function test_ShouldRespond_SignificantReserve1Drop() public {
+        bytes[] memory data = new bytes[](2);
+        
+        // Previous state: Normal reserves
+        data[1] = abi.encode(
+            uint256(1000),
+            uint256(10000),
+            uint112(100000),
+            uint112(200000),  // reserve1
+            block.timestamp - 100,
+            MONITORED_USER,
+            LIQUIDITY_POOL
+        );
+        
+        // Current state: reserve1 dropped 60%
+        data[0] = abi.encode(
+            uint256(1000),
+            uint256(10000),
+            uint112(100000),  // reserve0 unchanged
+            uint112(80000),   // reserve1 dropped to 40% of original
+            block.timestamp,
+            MONITORED_USER,
+            LIQUIDITY_POOL
+        );
+        
+        (bool shouldRespond, ) = trap.shouldRespond(data);
+        
+        assertTrue(shouldRespond, "Should respond to 60% reserve1 drop");
+    }
+    
+    function test_ShouldNotRespond_NormalActivity() public {
+        bytes[] memory data = new bytes[](2);
+        
+        // Previous state
+        data[1] = abi.encode(
+            uint256(1000),
+            uint256(10000),
+            uint112(100000),
+            uint112(200000),
+            block.timestamp - 100,
+            MONITORED_USER,
+            LIQUIDITY_POOL
+        );
+        
+        // Current state: Small changes, all within threshold
+        data[0] = abi.encode(
+            uint256(980),     // 2% drop - OK
+            uint256(10000),
+            uint112(95000),   // 5% drop - OK
+            uint112(195000),  // 2.5% drop - OK
+            block.timestamp,
+            MONITORED_USER,
+            LIQUIDITY_POOL
+        );
+        
+        (bool shouldRespond, ) = trap.shouldRespond(data);
+        
+        assertFalse(shouldRespond, "Should not respond to normal market activity");
+    }
+    
+    function test_WithdrawerSetup() public {
+        assertEq(withdrawer.owner(), address(this), "Withdrawer owner should be deployer");
+        assertEq(withdrawer.droseraResponse(), droseraResponse, "Drosera response should be set");
+        assertFalse(withdrawer.paused(), "Should not be paused initially");
     }
     
     function test_WithdrawerPause() public {
-        assertFalse(withdrawer.paused(), "Should not be paused initially");
-        
         withdrawer.setPaused(true);
-        assertTrue(withdrawer.paused(), "Should be paused after setting");
+        assertTrue(withdrawer.paused(), "Should be paused");
         
         withdrawer.setPaused(false);
-        assertFalse(withdrawer.paused(), "Should not be paused after unsetting");
+        assertFalse(withdrawer.paused(), "Should be unpaused");
     }
     
-    function test_WithdrawerOwnership() public {
+    function test_WithdrawerOwnershipTransfer() public {
         address newOwner = address(0x5555);
         
         withdrawer.transferOwnership(newOwner);
